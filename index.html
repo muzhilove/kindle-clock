@@ -43,7 +43,7 @@ body{margin:0;background:#fff;color:#000;overflow:hidden;}
 </head>
 <body>
 <div class="page">
-  <!-- 点击大时钟即可一键对齐 Kindle 系统时间 -->
+  <!-- 点击大时钟即可强制向网络校准时间 -->
   <div class="time" id="clock" onclick="resetOffset()">--:--</div>
   <div class="date-week" id="dateWeek">----年--月--日</div>
   <div class="info-main small" id="lunar">正在计算农历...</div>
@@ -61,8 +61,18 @@ body{margin:0;background:#fff;color:#000;overflow:hidden;}
 function pad(n){return n<10?"0"+n:n;}
 var lastMinute = -1;
 
-var offsetSeconds = parseInt(localStorage.getItem('kindleOffset')) || 0;
-var baseMinuteOffset = 0; // 0 表示严格同步 Kindle 系统时间
+var offsetSeconds = parseInt(localStorage.getItem('kindleOffset')) || 0; // 手动微调秒数
+var autoNetworkOffset = parseInt(localStorage.getItem('kindleAutoNetOffset')) || 0; // 自动计算的网络时间偏差
+
+/* 获取当前精确时间对象 */
+function getCalculatedNow() {
+    var now = new Date();
+    // Kindle 浏览器时区兼容处理
+    if(now.getTimezoneOffset() === 0) now.setHours(now.getHours() + 8);
+    // 叠加网络时间误差 + 手动微调秒数
+    now.setSeconds(now.getSeconds() + autoNetworkOffset + offsetSeconds);
+    return now;
+}
 
 /* ===== 1. 本地农历算法 (纯离线运行) ===== */
 var Lunar = {
@@ -115,7 +125,7 @@ var funMessages = ["宜动","宜吃美食","宜喝茶","宜发呆","宜读书","
 
 function getSolarTermDate(y,n){ return new Date(31556925974.7*(y-1900)+sTermInfo[n]*60000+Date.UTC(1900,0,6,2,5)); }
 
-/* ===== 3. Open-Meteo 天气代码映射为 Kindle 兼容字符图标 ===== */
+/* ===== 3. 天气代码图标映射 ===== */
 function parseWeatherCode(code) {
     if (code === 0) return { text: "晴", icon: "☀" };
     if (code >= 1 && code <= 3) return { text: "多云", icon: "☁" };
@@ -128,9 +138,7 @@ function parseWeatherCode(code) {
 
 /* ===== 4. 本地公历/农历渲染 ===== */
 function updateLocalDate(){
-    var now = new Date();
-    if(now.getTimezoneOffset() === 0) now.setHours(now.getHours() + 8);
-    now.setSeconds(now.getSeconds() + baseMinuteOffset + offsetSeconds);
+    var now = getCalculatedNow();
 
     var ty = now.getFullYear(), tm = now.getMonth() + 1, td = now.getDate();
     document.getElementById("dateWeek").innerHTML = ty + "年" + tm + "月" + td + "日 星期" + "日一二三四五六"[now.getDay()];
@@ -147,7 +155,7 @@ function updateLocalDate(){
     document.getElementById("term").innerHTML = txt;
 }
 
-/* ===== 5. 独立天气刷新函数 ===== */
+/* ===== 5. 天气与网络时间双重校准请求 ===== */
 function updateWeather(){
     var xhr = new XMLHttpRequest();
     var url = "https://api.open-meteo.com/v1/forecast?latitude=30.8936&longitude=120.0881&current_weather=true&daily=sunrise,sunset&timezone=Asia/Shanghai&t=" + new Date().getTime();
@@ -158,6 +166,20 @@ function updateWeather(){
     xhr.onreadystatechange = function(){
         if(xhr.readyState === 4){
             if(xhr.status === 200){
+                // 核心功能：自动解析 HTTP 响应头中的标准 GMT 时间并计算设备误差
+                try {
+                    var serverDateHeader = xhr.getResponseHeader("Date");
+                    if(serverDateHeader){
+                        var serverTime = new Date(serverDateHeader).getTime();
+                        var localTime = new Date().getTime();
+                        if(!isNaN(serverTime)){
+                            autoNetworkOffset = Math.round((serverTime - localTime) / 1000);
+                            localStorage.setItem('kindleAutoNetOffset', autoNetworkOffset);
+                            tick(); // 立即刷新页面时间显示
+                        }
+                    }
+                } catch(e){}
+
                 try {
                     var j = JSON.parse(xhr.responseText);
                     if(j && j.current_weather && j.daily){
@@ -201,10 +223,7 @@ function updateAllData(){
 
 /* ===== 7. 核心时钟循环 ===== */
 function tick(){
-    var now = new Date();
-    if(now.getTimezoneOffset() === 0) now.setHours(now.getHours() + 8);
-    
-    now.setSeconds(now.getSeconds() + baseMinuteOffset + offsetSeconds);
+    var now = getCalculatedNow();
 
     var h = now.getHours(), m = now.getMinutes();
     document.getElementById("clock").innerHTML = pad(h) + ":" + pad(m);
@@ -229,14 +248,17 @@ function adjustOffset(val) {
     document.getElementById("offsetTip").innerHTML = "已微调: " + (offsetSeconds >=0 ? "+" : "") + offsetSeconds + "秒";
 }
 
-/* 一键对齐设备时间函数 */
+/* 点击一键向网络校准时间 */
 function resetOffset() {
     offsetSeconds = 0;
-    baseMinuteOffset = 0;
     localStorage.setItem('kindleOffset', 0);
-    tick(); 
-    document.getElementById("offsetTip").innerHTML = "已重置：已完全对齐 Kindle 设备系统时间";
-    setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 3000);
+    document.getElementById("offsetTip").innerHTML = "正在向网络对齐标准时间...";
+    updateWeather();
+    setTimeout(function(){
+        var diffText = (autoNetworkOffset >= 0 ? "+" : "") + autoNetworkOffset + "秒";
+        document.getElementById("offsetTip").innerHTML = "已对齐网络标准时间 (设备偏离: " + diffText + ")";
+        setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 4000);
+    }, 1200);
 }
 
 // 初始化运行
