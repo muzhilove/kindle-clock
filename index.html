@@ -43,7 +43,7 @@ body{margin:0;background:#fff;color:#000;overflow:hidden;}
 </head>
 <body>
 <div class="page">
-  <!-- 点击大时钟即可强制向网络校准时间 -->
+  <!-- 点击大时钟强制从网络时间接口同步时间 -->
   <div class="time" id="clock" onclick="resetOffset()">--:--</div>
   <div class="date-week" id="dateWeek">----年--月--日</div>
   <div class="info-main small" id="lunar">正在计算农历...</div>
@@ -61,20 +61,17 @@ body{margin:0;background:#fff;color:#000;overflow:hidden;}
 function pad(n){return n<10?"0"+n:n;}
 var lastMinute = -1;
 
-var offsetSeconds = parseInt(localStorage.getItem('kindleOffset')) || 0; // 手动微调秒数
-var autoNetworkOffset = parseInt(localStorage.getItem('kindleAutoNetOffset')) || 0; // 自动计算的网络时间偏差
+var offsetSeconds = parseInt(localStorage.getItem('kindleOffset')) || 0; 
+var autoNetworkOffset = parseInt(localStorage.getItem('kindleAutoNetOffset')) || 0; 
 
-/* 获取当前精确时间对象 */
 function getCalculatedNow() {
     var now = new Date();
-    // Kindle 浏览器时区兼容处理
     if(now.getTimezoneOffset() === 0) now.setHours(now.getHours() + 8);
-    // 叠加网络时间误差 + 手动微调秒数
     now.setSeconds(now.getSeconds() + autoNetworkOffset + offsetSeconds);
     return now;
 }
 
-/* ===== 1. 本地农历算法 (纯离线运行) ===== */
+/* ===== 1. 本地农历算法 ===== */
 var Lunar = {
     data: [0x0a5b6,0x0a4d0,0x0d250,0x1d255,0x0b540,0x0d6a0,0x0ada2,0x095b0,0x14977,0x04970,0x0a4b0,0x0b4b5,0x06a50,0x06d40,0x1ab54,0x02b60,0x09570,0x052f2,0x04970,0x06566,0x0d4a0,0x0ea50,0x06e95,0x05ad0,0x02b60,0x186e3,0x092e0,0x1c8d7,0x0c950,0x0d4a0,0x1d8a6],
     mNames: ["正月","二月","三月","四月","五月","六月","七月","八月","九月","十月","冬月","腊月"],
@@ -125,7 +122,6 @@ var funMessages = ["宜动","宜吃美食","宜喝茶","宜发呆","宜读书","
 
 function getSolarTermDate(y,n){ return new Date(31556925974.7*(y-1900)+sTermInfo[n]*60000+Date.UTC(1900,0,6,2,5)); }
 
-/* ===== 3. 天气代码图标映射 ===== */
 function parseWeatherCode(code) {
     if (code === 0) return { text: "晴", icon: "☀" };
     if (code >= 1 && code <= 3) return { text: "多云", icon: "☁" };
@@ -136,10 +132,8 @@ function parseWeatherCode(code) {
     return { text: "晴", icon: "☀" };
 }
 
-/* ===== 4. 本地公历/农历渲染 ===== */
 function updateLocalDate(){
     var now = getCalculatedNow();
-
     var ty = now.getFullYear(), tm = now.getMonth() + 1, td = now.getDate();
     document.getElementById("dateWeek").innerHTML = ty + "年" + tm + "月" + td + "日 星期" + "日一二三四五六"[now.getDay()];
     
@@ -155,7 +149,49 @@ function updateLocalDate(){
     document.getElementById("term").innerHTML = txt;
 }
 
-/* ===== 5. 天气与网络时间双重校准请求 ===== */
+/* ===== 3. 独立网络授时对齐函数 (解析 JSON 内部 timestamp) ===== */
+function syncNetworkTime() {
+    var xhr = new XMLHttpRequest();
+    // 使用专用的 WorldTimeAPI 获取北京时间 JSON 报文
+    xhr.open("GET", "https://worldtimeapi.org/api/timezone/Asia/Shanghai", true);
+    xhr.timeout = 8000;
+    
+    xhr.onreadystatechange = function(){
+        if(xhr.readyState === 4){
+            if(xhr.status === 200){
+                try {
+                    var res = JSON.parse(xhr.responseText);
+                    if(res && res.unixtime){
+                        var netTimeMs = res.unixtime * 1000;
+                        var localTimeMs = new Date().getTime();
+                        
+                        autoNetworkOffset = Math.round((netTimeMs - localTimeMs) / 1000);
+                        localStorage.setItem('kindleAutoNetOffset', autoNetworkOffset);
+                        
+                        tick();
+                        updateLocalDate();
+                        
+                        var diffStr = (autoNetworkOffset >= 0 ? "+" : "") + autoNetworkOffset + "秒";
+                        document.getElementById("offsetTip").innerHTML = "已对齐网络标准时间 (设备偏差: " + diffStr + ")";
+                        setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 4000);
+                        return;
+                    }
+                } catch(e){}
+            }
+            document.getElementById("offsetTip").innerHTML = "网络授时接口响应异常";
+            setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 3000);
+        }
+    };
+    
+    xhr.ontimeout = function(){
+        document.getElementById("offsetTip").innerHTML = "网络授时超时，请检查网络";
+        setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 3000);
+    };
+
+    xhr.send();
+}
+
+/* ===== 4. 天气获取函数 ===== */
 function updateWeather(){
     var xhr = new XMLHttpRequest();
     var url = "https://api.open-meteo.com/v1/forecast?latitude=30.8936&longitude=120.0881&current_weather=true&daily=sunrise,sunset&timezone=Asia/Shanghai&t=" + new Date().getTime();
@@ -164,67 +200,32 @@ function updateWeather(){
     xhr.timeout = 10000;
     
     xhr.onreadystatechange = function(){
-        if(xhr.readyState === 4){
-            if(xhr.status === 200){
-                // 核心功能：自动解析 HTTP 响应头中的标准 GMT 时间并计算设备误差
-                try {
-                    var serverDateHeader = xhr.getResponseHeader("Date");
-                    if(serverDateHeader){
-                        var serverTime = new Date(serverDateHeader).getTime();
-                        var localTime = new Date().getTime();
-                        if(!isNaN(serverTime)){
-                            autoNetworkOffset = Math.round((serverTime - localTime) / 1000);
-                            localStorage.setItem('kindleAutoNetOffset', autoNetworkOffset);
-                            tick(); // 立即刷新页面时间显示
-                        }
-                    }
-                } catch(e){}
-
-                try {
-                    var j = JSON.parse(xhr.responseText);
-                    if(j && j.current_weather && j.daily){
-                        var temp = j.current_weather.temperature;
-                        var wCode = j.current_weather.weathercode;
-                        var wInfo = parseWeatherCode(wCode);
-                        
-                        var sunrise = j.daily.sunrise[0] ? j.daily.sunrise[0].substr(11,5) : "--:--";
-                        var sunset = j.daily.sunset[0] ? j.daily.sunset[0].substr(11,5) : "--:--";
-                        
-                        document.getElementById("weatherMain").innerHTML = "浙江·湖州  " + wInfo.icon + " " + wInfo.text + "  " + temp + "℃";
-                        document.getElementById("sun").innerHTML = "☼↑ 日出 " + sunrise + "   ☼↓ 日落 " + sunset;
-                    } else {
-                        document.getElementById("weatherMain").innerHTML = "天气数据结构异常";
-                    }
-                } catch(e){
-                    document.getElementById("weatherMain").innerHTML = "天气解析失败";
+        if(xhr.readyState === 4 && xhr.status === 200){
+            try {
+                var j = JSON.parse(xhr.responseText);
+                if(j && j.current_weather && j.daily){
+                    var temp = j.current_weather.temperature;
+                    var wInfo = parseWeatherCode(j.current_weather.weathercode);
+                    var sunrise = j.daily.sunrise[0] ? j.daily.sunrise[0].substr(11,5) : "--:--";
+                    var sunset = j.daily.sunset[0] ? j.daily.sunset[0].substr(11,5) : "--:--";
+                    
+                    document.getElementById("weatherMain").innerHTML = "浙江·湖州  " + wInfo.icon + " " + wInfo.text + "  " + temp + "℃";
+                    document.getElementById("sun").innerHTML = "☼↑ 日出 " + sunrise + "   ☼↓ 日落 " + sunset;
                 }
-            } else {
-                document.getElementById("weatherMain").innerHTML = "天气获取失败(" + xhr.status + ")";
-            }
+            } catch(e){}
         }
     };
-    
-    xhr.onerror = function(){
-        document.getElementById("weatherMain").innerHTML = "天气网络连接受阻";
-    };
-    
-    xhr.ontimeout = function(){
-        document.getElementById("weatherMain").innerHTML = "天气获取超时";
-    };
-
     xhr.send();
 }
 
-/* ===== 6. 总刷新函数 ===== */
 function updateAllData(){
     updateLocalDate();
     updateWeather();
+    syncNetworkTime(); // 启动时自动同步一次网络时间
 }
 
-/* ===== 7. 核心时钟循环 ===== */
 function tick(){
     var now = getCalculatedNow();
-
     var h = now.getHours(), m = now.getMinutes();
     document.getElementById("clock").innerHTML = pad(h) + ":" + pad(m);
 
@@ -248,17 +249,12 @@ function adjustOffset(val) {
     document.getElementById("offsetTip").innerHTML = "已微调: " + (offsetSeconds >=0 ? "+" : "") + offsetSeconds + "秒";
 }
 
-/* 点击一键向网络校准时间 */
+/* 手动点击大时钟逻辑 */
 function resetOffset() {
     offsetSeconds = 0;
     localStorage.setItem('kindleOffset', 0);
-    document.getElementById("offsetTip").innerHTML = "正在向网络对齐标准时间...";
-    updateWeather();
-    setTimeout(function(){
-        var diffText = (autoNetworkOffset >= 0 ? "+" : "") + autoNetworkOffset + "秒";
-        document.getElementById("offsetTip").innerHTML = "已对齐网络标准时间 (设备偏离: " + diffText + ")";
-        setTimeout(function(){ document.getElementById("offsetTip").innerHTML = ""; }, 4000);
-    }, 1200);
+    document.getElementById("offsetTip").innerHTML = "正在向网络时间服务器校准...";
+    syncNetworkTime();
 }
 
 // 初始化运行
